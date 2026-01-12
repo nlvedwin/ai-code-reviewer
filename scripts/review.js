@@ -345,12 +345,9 @@ function readRawDiff() {
  */
 function getDefaultFocusAreas() {
   return [
-    { name: 'Code Quality', description: 'Identify any code smells, anti-patterns, or areas that could be improved' },
-    { name: 'Potential Bugs', description: 'Look for logic errors, edge cases, or potential runtime issues' },
-    { name: 'Security', description: 'Flag any security concerns or vulnerabilities' },
-    { name: 'Performance', description: 'Note any performance implications' },
-    { name: 'Best Practices', description: 'Suggest improvements based on industry best practices' },
-    { name: 'Readability', description: 'Comment on code clarity and maintainability' }
+    { name: 'Bugs & Errors', description: 'Identify syntax errors, logic bugs, null/undefined issues, or runtime exceptions in the CHANGED code only' },
+    { name: 'Security Issues', description: 'Flag security vulnerabilities (injection, XSS, auth issues) ONLY if introduced by the changes' },
+    { name: 'Breaking Changes', description: 'Identify changes that could break existing functionality or APIs' }
   ];
 }
 
@@ -441,12 +438,16 @@ You MUST respond with a valid JSON object (no markdown code blocks, just raw JSO
   ]
 }
 
-IMPORTANT:
+IMPORTANT RULES:
 - The "path" must exactly match the file path shown in the diff (e.g., "src/utils/helper.js")
 - The "line" must be a line number from the NEW version of the file (lines with + prefix or unchanged lines)
-- Only comment on lines that are actually in the diff (changed or context lines)
-- Be constructive and helpful in your messages
-- Include code suggestions when applicable`;
+- ONLY comment on lines that were actually CHANGED (+ or - lines in the diff)
+- DO NOT suggest generic improvements like "add error handling", "add validation", "add tests" unless there's a SPECIFIC bug
+- DO NOT comment on code outside the diff or suggest refactoring unchanged code
+- Focus ONLY on: bugs, syntax errors, logic errors, security issues, breaking changes
+- If the code changes look fine, return empty arrays for inline_comments and general_comments
+- Quality over quantity: only include comments for REAL issues that need fixing
+- Use "critical" or "major" severity sparingly - only for actual bugs or security issues`;
   } else {
     prompt += `
 ## Response Format
@@ -486,7 +487,18 @@ function buildSystemPrompt() {
   if (SYSTEM_PROMPT) {
     return SYSTEM_PROMPT;
   }
-  return 'You are an expert code reviewer. Provide thorough, constructive feedback that helps developers improve their code. Be specific, cite line numbers, and explain the reasoning behind your suggestions.';
+  return `You are an expert code reviewer. Your job is to review ONLY the actual code changes in the diff.
+
+CRITICAL RULES:
+1. ONLY comment on lines that were actually changed (lines with + or - prefix in the diff)
+2. DO NOT suggest improvements to unchanged code or code outside the diff
+3. DO NOT make generic suggestions like "add error handling" or "add validation" unless there's a specific, concrete issue in the changed code
+4. DO NOT suggest things that are nice-to-have but not directly related to the changes
+5. Focus on ACTUAL PROBLEMS: bugs, syntax errors, logic errors, security vulnerabilities in the changed code
+6. If the changes look good and have no issues, say so - don't invent problems
+7. Be concise and actionable - every comment should point to a specific issue that needs fixing
+
+Quality over quantity: One meaningful comment about a real bug is worth more than five generic suggestions.`;
 }
 
 /**
