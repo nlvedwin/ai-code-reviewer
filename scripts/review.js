@@ -184,12 +184,14 @@ function extractRenameInfo(fileContent) {
 
 /**
  * Parse diff to extract file and line information for inline comments
- * Returns a map of filename -> { hunks: [{ startLine, lineCount, diffPosition }] }
+ * Returns a map of filename -> { hunks: [...], lines: [...] }
+ *
+ * IMPORTANT: GitHub's position is 1-indexed and relative to the file's diff,
+ * starting from the first line after the file header (the @@ line counts as position 1)
  */
 function parseDiffForLineMapping(diffContent) {
   const fileMap = {};
   const files = parseDiffIntoFiles(diffContent);
-  let globalDiffPosition = 0;
 
   for (const file of files) {
     if (file.status === 'deleted' || file.isBinary) continue;
@@ -197,39 +199,59 @@ function parseDiffForLineMapping(diffContent) {
     const lines = file.content.split('\n');
     const hunks = [];
     let currentHunk = null;
+    let diffPosition = 0; // Position relative to this file's diff (1-indexed, starts after file header)
+    let inHunk = false;
 
     for (let i = 0; i < lines.length; i++) {
-      globalDiffPosition++;
       const line = lines[i];
+
+      // Skip diff header lines (diff --git, index, ---, +++)
+      if (line.startsWith('diff --git') ||
+          line.startsWith('index ') ||
+          line.startsWith('--- ') ||
+          line.startsWith('+++ ') ||
+          line.startsWith('new file mode') ||
+          line.startsWith('old file mode') ||
+          line.startsWith('similarity index') ||
+          line.startsWith('rename from') ||
+          line.startsWith('rename to')) {
+        continue;
+      }
 
       // Parse hunk header: @@ -oldStart,oldCount +newStart,newCount @@
       const hunkMatch = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
       if (hunkMatch) {
+        diffPosition++; // The @@ line itself is position 1 (or continues from previous hunk)
         currentHunk = {
           oldStart: parseInt(hunkMatch[1], 10),
           newStart: parseInt(hunkMatch[3], 10),
-          diffPositionStart: globalDiffPosition,
           lines: []
         };
         hunks.push(currentHunk);
+        inHunk = true;
         continue;
       }
 
-      if (currentHunk && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' ') || line === '')) {
-        const lineType = line.startsWith('+') ? 'add' : line.startsWith('-') ? 'delete' : 'context';
+      // Only count lines that are part of a hunk
+      if (inHunk && currentHunk) {
+        diffPosition++;
 
-        // Calculate the actual line number in the new file
-        let newLineNumber = null;
-        if (lineType !== 'delete') {
-          newLineNumber = currentHunk.newStart + currentHunk.lines.filter(l => l.type !== 'delete').length;
+        if (line.startsWith('+') || line.startsWith('-') || line.startsWith(' ') || line === '') {
+          const lineType = line.startsWith('+') ? 'add' : line.startsWith('-') ? 'delete' : 'context';
+
+          // Calculate the actual line number in the new file
+          let newLineNumber = null;
+          if (lineType !== 'delete') {
+            newLineNumber = currentHunk.newStart + currentHunk.lines.filter(l => l.type !== 'delete').length;
+          }
+
+          currentHunk.lines.push({
+            type: lineType,
+            content: line,
+            diffPosition: diffPosition,
+            newLineNumber
+          });
         }
-
-        currentHunk.lines.push({
-          type: lineType,
-          content: line,
-          diffPosition: globalDiffPosition,
-          newLineNumber
-        });
       }
     }
 
@@ -701,6 +723,7 @@ async function submitPRReview(reviewData, fileMap) {
           suggestion: '💡 **SUGGESTION**'
         };
 
+        console.log(`Adding inline comment: ${comment.path}:${comment.line} -> position ${position}`);
         comments.push({
           path: comment.path,
           position: position,
