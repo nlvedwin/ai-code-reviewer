@@ -41,6 +41,10 @@ inputs:
     description: 'Comma-separated list of focus areas (e.g., security,performance,bugs)'
     required: false
     default: ''
+  inline_comments:
+    description: 'Whether to post inline comments on specific lines of code (requires github_token)'
+    required: false
+    default: 'true'
 
 outputs:
   review:
@@ -71,16 +75,19 @@ runs:
       shell: bash
       env:
         OPENROUTER_API_KEY: ${{ inputs.openrouter_api_key }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
         AI_MODEL: ${{ inputs.model }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         REPO_NAME: ${{ github.repository }}
+        COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
         MAX_DIFF_SIZE: ${{ inputs.max_diff_size }}
         TEMPERATURE: ${{ inputs.temperature }}
         CUSTOM_PROMPT: ${{ inputs.custom_prompt }}
         SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         REVIEW_FOCUS: ${{ inputs.review_focus }}
+        INLINE_COMMENTS: ${{ inputs.inline_comments }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         node ${{ github.action_path }}/scripts/review.js
@@ -95,8 +102,8 @@ runs:
           echo 'EOF'
         } >> $GITHUB_OUTPUT
 
-    - name: Post review comment
-      if: ${{ inputs.post_comment == 'true' }}
+    - name: Post review comment (fallback for non-inline mode)
+      if: ${{ inputs.post_comment == 'true' && inputs.inline_comments == 'false' }}
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
