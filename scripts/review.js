@@ -777,8 +777,13 @@ async function getPreviousAIReviewThreads() {
             nodes {
               id
               isResolved
+              isOutdated
               path
               line
+              originalLine
+              startLine
+              originalStartLine
+              diffSide
               comments(first: 1) {
                 nodes {
                   body
@@ -798,13 +803,23 @@ async function getPreviousAIReviewThreads() {
     const data = await callGitHubGraphQL(query, { owner, repo, prNumber });
     const threads = data?.repository?.pullRequest?.reviewThreads?.nodes || [];
 
+    console.log(`Total review threads on PR: ${threads.length}`);
+
     // Filter to only AI Code Reviewer threads (match by severity emoji pattern in body)
     const aiPatterns = ['🔴 **CRITICAL**', '🟠 **MAJOR**', '🟡 **MINOR**', '💡 **SUGGESTION**'];
     const aiThreads = threads.filter(thread => {
-      if (thread.isResolved) return false; // Skip already resolved
+      if (thread.isResolved) {
+        console.log(`  Thread ${thread.id} on ${thread.path}:${thread.line} - already resolved, skipping`);
+        return false;
+      }
       const firstComment = thread.comments?.nodes?.[0];
-      if (!firstComment) return false;
-      return aiPatterns.some(pattern => firstComment.body?.includes(pattern));
+      if (!firstComment) {
+        console.log(`  Thread ${thread.id} - no comments, skipping`);
+        return false;
+      }
+      const isAIThread = aiPatterns.some(pattern => firstComment.body?.includes(pattern));
+      console.log(`  Thread ${thread.id} on ${thread.path}:${thread.line} - isAI: ${isAIThread}, isOutdated: ${thread.isOutdated}`);
+      return isAIThread;
     });
 
     console.log(`Found ${aiThreads.length} unresolved AI review threads`);
@@ -824,24 +839,42 @@ async function getPreviousAIReviewThreads() {
 function findResolvableThreads(previousThreads, newComments, fileMap) {
   const resolvable = [];
 
+  console.log(`Checking ${previousThreads.length} previous threads against ${newComments?.length || 0} new comments`);
+
   for (const thread of previousThreads) {
-    const { path: filePath, line } = thread;
+    const { path: filePath, line, originalLine, startLine, diffSide } = thread;
+    console.log(`\nEvaluating thread: ${filePath}:${line} (id: ${thread.id})`);
+    console.log(`  Thread metadata: originalLine=${originalLine}, startLine=${startLine}, diffSide=${diffSide}`);
 
     // Check if this file/line is still in the current diff
     const fileInfo = fileMap[filePath];
+    console.log(`  File in fileMap: ${!!fileInfo}`);
+    if (!fileInfo) {
+      console.log(`  Available paths in fileMap: ${Object.keys(fileMap).join(', ')}`);
+    }
+
     const lineStillInDiff = fileInfo?.hunks?.some(hunk =>
       hunk.lines.some(l => l.newLineNumber === line)
     );
+    console.log(`  Line ${line} still in diff: ${lineStillInDiff}`);
 
     // Check if the new review has a comment on the same file/line
     const sameIssueInNewReview = newComments?.some(
       c => c.path === filePath && c.line === line
     );
+    console.log(`  Same issue in new review: ${sameIssueInNewReview}`);
 
-    // Resolve if: line is no longer in diff OR no new comment on same location
-    if (!lineStillInDiff || !sameIssueInNewReview) {
+    // Resolve if:
+    // 1. Thread is marked as outdated by GitHub (code changed), OR
+    // 2. Line is no longer in the current diff, OR
+    // 3. No new comment on the same location (issue was fixed)
+    const shouldResolve = thread.isOutdated || !lineStillInDiff || !sameIssueInNewReview;
+
+    if (shouldResolve) {
       resolvable.push(thread);
-      console.log(`Thread ${thread.id} on ${filePath}:${line} marked for resolution`);
+      console.log(`  -> MARKED FOR RESOLUTION (isOutdated=${thread.isOutdated}, lineNotInDiff=${!lineStillInDiff}, noNewIssue=${!sameIssueInNewReview})`);
+    } else {
+      console.log(`  -> NOT resolved (not outdated AND line still in diff AND same issue flagged again)`);
     }
   }
 
@@ -873,11 +906,14 @@ async function resolveOutdatedThreads(threads) {
   let resolved = 0;
   for (const thread of threads) {
     try {
-      await callGitHubGraphQL(mutation, { threadId: thread.id });
+      console.log(`Attempting to resolve thread ${thread.id}...`);
+      const result = await callGitHubGraphQL(mutation, { threadId: thread.id });
       console.log(`Resolved thread ${thread.id} on ${thread.path}:${thread.line}`);
+      console.log(`  Result: isResolved=${result?.resolveReviewThread?.thread?.isResolved}`);
       resolved++;
     } catch (error) {
       console.error(`Failed to resolve thread ${thread.id}:`, error.message);
+      console.error(`  Full error:`, error);
     }
   }
 
