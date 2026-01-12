@@ -1,0 +1,109 @@
+name: 'AI Code Reviewer'
+description: 'Automatically review Pull Requests using AI models via OpenRouter API'
+author: 'Your Name'
+
+branding:
+  icon: 'code'
+  color: 'purple'
+
+inputs:
+  openrouter_api_key:
+    description: 'Your OpenRouter API key'
+    required: true
+  model:
+    description: 'The AI model to use (e.g., anthropic/claude-3.5-sonnet, openai/gpt-4-turbo)'
+    required: false
+    default: 'anthropic/claude-3.5-sonnet'
+  github_token:
+    description: 'GitHub token for posting comments'
+    required: true
+  max_diff_size:
+    description: 'Maximum diff size in characters (default: 100000)'
+    required: false
+    default: '100000'
+  temperature:
+    description: 'Model temperature for response generation (0-1)'
+    required: false
+    default: '0.3'
+  post_comment:
+    description: 'Whether to post the review as a PR comment'
+    required: false
+    default: 'true'
+  custom_prompt:
+    description: 'Custom instructions to append to the review prompt'
+    required: false
+    default: ''
+  system_prompt:
+    description: 'Override the entire system prompt (advanced usage)'
+    required: false
+    default: ''
+  review_focus:
+    description: 'Comma-separated list of focus areas (e.g., security,performance,bugs)'
+    required: false
+    default: ''
+
+outputs:
+  review:
+    description: 'The generated code review content'
+    value: ${{ steps.review.outputs.review }}
+  model_used:
+    description: 'The AI model that was used for the review'
+    value: ${{ steps.review.outputs.model_used }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Get PR diff
+      id: diff
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        gh pr diff ${{ github.event.pull_request.number }} > ${{ github.action_path }}/pr_diff.txt
+
+    - name: Run AI Code Review
+      id: review
+      shell: bash
+      env:
+        OPENROUTER_API_KEY: ${{ inputs.openrouter_api_key }}
+        AI_MODEL: ${{ inputs.model }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BODY: ${{ github.event.pull_request.body }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO_NAME: ${{ github.repository }}
+        MAX_DIFF_SIZE: ${{ inputs.max_diff_size }}
+        TEMPERATURE: ${{ inputs.temperature }}
+        CUSTOM_PROMPT: ${{ inputs.custom_prompt }}
+        SYSTEM_PROMPT: ${{ inputs.system_prompt }}
+        REVIEW_FOCUS: ${{ inputs.review_focus }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        node ${{ github.action_path }}/scripts/review.js
+
+        # Set outputs
+        echo "model_used=$AI_MODEL" >> $GITHUB_OUTPUT
+
+        # Set multiline output for review
+        {
+          echo 'review<<EOF'
+          cat ${{ github.action_path }}/review_output.md
+          echo 'EOF'
+        } >> $GITHUB_OUTPUT
+
+    - name: Post review comment
+      if: ${{ inputs.post_comment == 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        if [ -f ${{ github.action_path }}/review_output.md ]; then
+          gh pr comment ${{ github.event.pull_request.number }} --body-file ${{ github.action_path }}/review_output.md
+        else
+          echo "No review output generated"
+          exit 1
+        fi
