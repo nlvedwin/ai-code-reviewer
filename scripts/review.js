@@ -713,6 +713,178 @@ function callGitHubAPI(method, endpoint, body = null) {
 }
 
 /**
+ * Make a GitHub GraphQL API request
+ */
+function callGitHubGraphQL(query, variables = {}) {
+  return new Promise((resolve, reject) => {
+    const requestBody = JSON.stringify({ query, variables });
+
+    const options = {
+      hostname: 'api.github.com',
+      port: 443,
+      path: '/graphql',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GITHUB_TOKEN}`,
+        'User-Agent': 'AI-Code-Reviewer',
+        'X-GitHub-Api-Version': '2022-11-28'
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        try {
+          const response = JSON.parse(data);
+          if (response.errors) {
+            reject(new Error(`GraphQL error: ${JSON.stringify(response.errors)}`));
+          } else {
+            resolve(response.data);
+          }
+        } catch {
+          reject(new Error(`Failed to parse GraphQL response: ${data}`));
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      reject(error);
+    });
+
+    req.write(requestBody);
+    req.end();
+  });
+}
+
+/**
+ * Fetch previous AI review threads on the PR
+ */
+async function getPreviousAIReviewThreads() {
+  const [owner, repo] = REPO_NAME.split('/');
+  const prNumber = parseInt(PR_NUMBER, 10);
+
+  const query = `
+    query($owner: String!, $repo: String!, $prNumber: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $prNumber) {
+          reviewThreads(first: 100) {
+            nodes {
+              id
+              isResolved
+              path
+              line
+              comments(first: 1) {
+                nodes {
+                  body
+                  author {
+                    login
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const data = await callGitHubGraphQL(query, { owner, repo, prNumber });
+    const threads = data?.repository?.pullRequest?.reviewThreads?.nodes || [];
+
+    // Filter to only AI Code Reviewer threads (match by severity emoji pattern in body)
+    const aiPatterns = ['🔴 **CRITICAL**', '🟠 **MAJOR**', '🟡 **MINOR**', '💡 **SUGGESTION**'];
+    const aiThreads = threads.filter(thread => {
+      if (thread.isResolved) return false; // Skip already resolved
+      const firstComment = thread.comments?.nodes?.[0];
+      if (!firstComment) return false;
+      return aiPatterns.some(pattern => firstComment.body?.includes(pattern));
+    });
+
+    console.log(`Found ${aiThreads.length} unresolved AI review threads`);
+    return aiThreads;
+  } catch (error) {
+    console.error('Failed to fetch previous review threads:', error.message);
+    return [];
+  }
+}
+
+/**
+ * Determine which previous comments should be resolved
+ * A comment should be resolved if:
+ * 1. The file/line is no longer in the current diff (code was changed/removed)
+ * 2. The same issue is NOT flagged in the new review
+ */
+function findResolvableThreads(previousThreads, newComments, fileMap) {
+  const resolvable = [];
+
+  for (const thread of previousThreads) {
+    const { path: filePath, line } = thread;
+
+    // Check if this file/line is still in the current diff
+    const fileInfo = fileMap[filePath];
+    const lineStillInDiff = fileInfo?.hunks?.some(hunk =>
+      hunk.lines.some(l => l.newLineNumber === line)
+    );
+
+    // Check if the new review has a comment on the same file/line
+    const sameIssueInNewReview = newComments?.some(
+      c => c.path === filePath && c.line === line
+    );
+
+    // Resolve if: line is no longer in diff OR no new comment on same location
+    if (!lineStillInDiff || !sameIssueInNewReview) {
+      resolvable.push(thread);
+      console.log(`Thread ${thread.id} on ${filePath}:${line} marked for resolution`);
+    }
+  }
+
+  return resolvable;
+}
+
+/**
+ * Resolve outdated review threads
+ */
+async function resolveOutdatedThreads(threads) {
+  if (threads.length === 0) {
+    console.log('No threads to resolve');
+    return;
+  }
+
+  console.log(`Resolving ${threads.length} outdated thread(s)...`);
+
+  const mutation = `
+    mutation($threadId: ID!) {
+      resolveReviewThread(input: {threadId: $threadId}) {
+        thread {
+          id
+          isResolved
+        }
+      }
+    }
+  `;
+
+  let resolved = 0;
+  for (const thread of threads) {
+    try {
+      await callGitHubGraphQL(mutation, { threadId: thread.id });
+      console.log(`Resolved thread ${thread.id} on ${thread.path}:${thread.line}`);
+      resolved++;
+    } catch (error) {
+      console.error(`Failed to resolve thread ${thread.id}:`, error.message);
+    }
+  }
+
+  console.log(`Successfully resolved ${resolved}/${threads.length} threads`);
+}
+
+/**
  * Submit a PR review with inline comments via GitHub API
  */
 async function submitPRReview(reviewData, fileMap) {
@@ -903,6 +1075,23 @@ async function main() {
       // Parse the raw diff to get line mappings
       const rawDiff = readRawDiff();
       const fileMap = parseDiffForLineMapping(rawDiff);
+
+      // Auto-resolve previous AI review comments that are no longer relevant
+      console.log('Checking for previous AI review comments to resolve...');
+      try {
+        const previousThreads = await getPreviousAIReviewThreads();
+        if (previousThreads.length > 0) {
+          const resolvableThreads = findResolvableThreads(
+            previousThreads,
+            reviewData.inline_comments || [],
+            fileMap
+          );
+          await resolveOutdatedThreads(resolvableThreads);
+        }
+      } catch (resolveError) {
+        console.error('Failed to auto-resolve previous comments:', resolveError.message);
+        // Continue with submission even if resolution fails
+      }
 
       // Submit PR review with inline comments
       try {
